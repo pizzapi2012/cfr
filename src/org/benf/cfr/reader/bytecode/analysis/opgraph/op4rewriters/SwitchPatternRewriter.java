@@ -17,7 +17,6 @@ import org.benf.cfr.reader.bytecode.analysis.structured.statement.*;
 import org.benf.cfr.reader.bytecode.analysis.types.JavaTypeInstance;
 import org.benf.cfr.reader.bytecode.analysis.types.TypeConstants;
 import org.benf.cfr.reader.bytecode.analysis.types.discovery.InferredJavaType;
-import org.benf.cfr.reader.entities.classfilehelpers.SwitchClassHelper;
 import org.benf.cfr.reader.state.DCCommonState;
 import org.benf.cfr.reader.util.ClassFileVersion;
 import org.benf.cfr.reader.util.collections.Functional;
@@ -137,6 +136,84 @@ public class SwitchPatternRewriter  implements Op04Rewriter {
         typeSwitch(switchStatement, args, swatch, argList, actualSwitchValue, originalSwitchValue);
     }
 
+    private boolean extractTypeswitchCaseBody(StructuredCase k, Gathered gathered, Expression actualSwitchValue, LValue actualSearchControlValue, List<StructuredContinue> controlSources) {
+        Op04StructuredStatement caseBody = k.getBody();
+        StructuredStatement stm = caseBody.getStatement();
+        if (!(stm instanceof Block)) return false;
+        Block blk = (Block) stm;
+        List<Op04StructuredStatement> blkstm = blk.getBlockStatements();
+        if (blkstm.isEmpty()) return false;
+        Op04StructuredStatement defn = blkstm.get(0);
+        Op04StructuredStatement pred = blkstm.size() > 1 ? blkstm.get(1) : null;
+        StructuredStatement sdefn = defn.getStatement();
+
+            /* There's two possibilities here - sdefn could be a cast,
+
+               case Integer.class: {
+                    Integer i = n3;
+                    if (i <= n2) {
+
+               or it could be a set of instanceofs.
+
+               if (!(n3 instanceof Foo) && !(n3 instanceof Bar) ...... )
+
+
+
+             */
+
+        if (sdefn instanceof StructuredAssignment) {
+            StructuredAssignment sdef = (StructuredAssignment) sdefn;
+            LValue lv = sdef.getLvalue();
+            if (sdef.isCreator(lv)) {
+                Expression rhs = sdef.getRvalue();
+                if (rhs instanceof CastExpression) {
+                    // Bust through cast no matter what.
+                    rhs = ((CastExpression) rhs).getChild();
+                }
+                if (rhs.equals(actualSwitchValue)) {
+                    gathered.definitionLvalue = lv;
+                    gathered.definitionAssignment = defn;
+                }
+            }
+
+            // If we've found an assignment, we might have found a when clause too
+            if (gathered.definitionLvalue != null /*  || gathered.anonymous != null */) {
+                if (pred != null && pred.getStatement() instanceof StructuredIf) {
+                    StructuredIf sif = (StructuredIf) pred.getStatement();
+                    ConditionalExpression test = sif.getConditionalExpression();
+                    // If it passes, we expect a body like :
+                    // nextTest = 3
+                    // continue block5
+                    if (!extractGuards(sif, actualSearchControlValue, controlSources)) return true;
+                    gathered.test = test.getNegated().simplify();
+                    gathered.testContainer = pred;
+                }
+            }
+
+        } else if (sdefn instanceof StructuredIf) {
+            StructuredIf sif = (StructuredIf) sdefn;
+            ConditionalExpression ce = sif.getConditionalExpression();
+            ce = ce.simplify();
+            if (!(ce instanceof NotOperation)) {
+                ce = ce.getDemorganApplied(false);
+            }
+            // We expect a disjunction inside not.
+            if (!(ce instanceof NotOperation)) {
+                return false;
+            }
+            ce = ce.getNegated().getRightDeep(); // it was a not, so strip that.
+            // At this point, it SHOULD be a right deep tree in DNF.
+            if (!extractUnderscores(ce, actualSwitchValue)) return false;
+            gathered.underscore = true;
+            gathered.definitionAssignment = sdefn.getContainer();
+            if (!extractGuards(sif, actualSearchControlValue, controlSources)) return false;
+        } else {
+            // This doesn't match known patterns.  Fail.
+            return false;
+        }
+        return true;
+    }
+
     private void typeSwitch(StructuredStatement switchStatement, List<Expression> args, StructuredSwitch swatch, List<Expression> argList, Expression actualSwitchValue, Expression originalSwitchValue) {
 
         Expression originalSearchControlValue = args.get(3);
@@ -230,6 +307,8 @@ public class SwitchPatternRewriter  implements Op04Rewriter {
                   res = "bigger than n";
                   break;
 
+                Note - for record destructuring in place, this becomes significantly more complex.
+
              */
 
         Map<StructuredCase, Gathered> rev = MapFactory.newLazyMap(new UnaryFunction<StructuredCase, Gathered>() {
@@ -248,82 +327,9 @@ public class SwitchPatternRewriter  implements Op04Rewriter {
 
         List<StructuredContinue> controlSources = ListFactory.newList();
         for (Map.Entry<StructuredCase, Gathered> kv : rev.entrySet()) {
-            StructuredCase k = kv.getKey();
-            Gathered gathered = kv.getValue();
-            Op04StructuredStatement caseBody = k.getBody();
-            StructuredStatement stm = caseBody.getStatement();
-            if (!(stm instanceof Block)) return;
-            Block blk = (Block) stm;
-            List<Op04StructuredStatement> blkstm = blk.getBlockStatements();
-            if (blkstm.isEmpty()) return;
-            Op04StructuredStatement defn = blkstm.get(0);
-            Op04StructuredStatement pred = blkstm.size() > 1 ? blkstm.get(1) : null;
-            StructuredStatement sdefn = defn.getStatement();
-
-            /* There's two possibilities here - sdefn could be a cast,
-
-               case Integer.class: {
-                    Integer i = n3;
-                    if (i <= n2) {
-
-               or it could be a set of instanceofs.
-
-               if (!(n3 instanceof Foo) && !(n3 instanceof Bar) ...... )
-
-
-
-             */
-
-            if (sdefn instanceof StructuredAssignment) {
-                StructuredAssignment sdef = (StructuredAssignment) sdefn;
-                LValue lv = sdef.getLvalue();
-                if (sdef.isCreator(lv)) {
-                    Expression rhs = sdef.getRvalue();
-                    if (rhs instanceof CastExpression) {
-                        // Bust through cast no matter what.
-                        rhs = ((CastExpression) rhs).getChild();
-                    }
-                    if (rhs.equals(actualSwitchValue)) {
-                        gathered.definitionLvalue = lv;
-                        gathered.definitionAssignment = defn;
-                    }
-                }
-
-                // If we've found an assignment, we might have found a when clause too
-                if (gathered.definitionLvalue != null /*  || gathered.anonymous != null */) {
-                    if (pred != null && pred.getStatement() instanceof StructuredIf) {
-                        StructuredIf sif = (StructuredIf) pred.getStatement();
-                        ConditionalExpression test = sif.getConditionalExpression();
-                        // If it passes, we expect a body like :
-                        // nextTest = 3
-                        // continue block5
-                        if (!extractGuards(sif, actualSearchControlValue, controlSources)) continue;
-                        gathered.test = test.getNegated().simplify();
-                        gathered.testContainer = pred;
-                    }
-                }
-
-            } else if (sdefn instanceof StructuredIf) {
-                StructuredIf sif = (StructuredIf) sdefn;
-                ConditionalExpression ce = sif.getConditionalExpression();
-                ce = ce.simplify();
-                if (!(ce instanceof NotOperation)) {
-                    ce = ce.getDemorganApplied(false);
-                }
-                // We expect a disjunction inside not.
-                if (!(ce instanceof NotOperation)) {
-                    return;
-                }
-                ce = ce.getNegated().getRightDeep(); // it was a not, so strip that.
-                // At this point, it SHOULD be a right deep tree in DNF.
-                if (!extractUnderscores(ce, actualSwitchValue)) return;
-                gathered.underscore = true;
-                gathered.definitionAssignment = sdefn.getContainer();
-                if (!extractGuards(sif, actualSearchControlValue, controlSources)) return;
-            } else {
-                // This doesn't match known patterns.  Fail.
+            if (!extractTypeswitchCaseBody(kv.getKey(), kv.getValue(), actualSwitchValue, actualSearchControlValue, controlSources)) {
                 return;
-            }
+            };
         }
 
         // At this point, we've found all the gathered, we've found (hopefully) all the continues.
