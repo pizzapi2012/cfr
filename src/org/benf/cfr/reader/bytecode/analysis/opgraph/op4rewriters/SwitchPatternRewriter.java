@@ -542,7 +542,6 @@ public class SwitchPatternRewriter  implements Op04Rewriter {
 
      */
     private void typeSwitch(StructuredStatement switchStatement, List<Expression> args, StructuredSwitch swatch, List<Expression> argList, Expression actualSwitchValue, Expression originalSwitchValue) {
-
         Expression originalSearchControlValue = args.get(3);
         // use CastExpression.tryRemoveCast
         originalSearchControlValue = originalSearchControlValue instanceof CastExpression ? ((CastExpression) originalSearchControlValue).getChild() : originalSearchControlValue;
